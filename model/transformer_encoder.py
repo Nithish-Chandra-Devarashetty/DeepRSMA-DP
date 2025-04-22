@@ -8,27 +8,20 @@ import copy
 import math
 
 # Transformer encoder
+from transformers import AutoTokenizer, AutoModel
+import torch.nn as nn
+
+
 class transformer_1d(nn.Sequential):
     def __init__(self, hidden_size):
         super(transformer_1d, self).__init__()
-        transformer_emb_size_drug = hidden_size
-        # transformer_dropout_rate = 0.1
-        transformer_n_layer_drug = 4
-        transformer_intermediate_size_drug = hidden_size
-        transformer_num_attention_heads_drug = 4
-        transformer_attention_probs_dropout = 0.1
-        transformer_hidden_dropout_rate = 0.1
-        smile_vocab = 45
-        
-        self.smiles_embed = nn.Embedding(smile_vocab + 1, hidden_size, padding_idx=0)
+        self.hidden_size = hidden_size
+        self.tokenizer = AutoTokenizer.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
+        self.bert = AutoModel.from_pretrained("seyonec/ChemBERTa-zinc-base-v1")
 
-        self.encoder = Encoder_1d(transformer_n_layer_drug,
-                                         transformer_emb_size_drug,
-                                         transformer_intermediate_size_drug,
-                                         transformer_num_attention_heads_drug,
-                                         transformer_attention_probs_dropout,
-                                         transformer_hidden_dropout_rate)
-    
+        # ChemBERTa output size might be different than your model's hidden_size
+        self.project = nn.Linear(self.bert.config.hidden_size, hidden_size)
+
     def generate_masks(self, adj, adj_sizes):
         out = torch.ones(adj.shape[0], adj.shape[1])
         max_size = adj.shape[1]
@@ -38,19 +31,29 @@ class transformer_1d(nn.Sequential):
             for e_id, drug_len in enumerate(adj_sizes):
                 out[e_id, drug_len: max_size] = 0
         return out
-    
-    def forward(self, batch, device):
-        smiles, smiles_len,atom_locate = batch.smile_emb, batch.smile_len, batch.atom_len
-        smiles = torch.reshape(smiles, (-1, 128))
-        smiles = self.smiles_embed(smiles)  # B * seq len * emb_dim
 
-        emb = smiles.long()
-        e_mask = batch.mask.reshape(-1,128)
-        ex_e_mask = e_mask.unsqueeze(1).unsqueeze(2)
+    def forward(self, batch, device):
+        # Expecting batch.smiles_raw: List[str]
+        smiles_list = batch.smiles_raw
+        encoding = self.tokenizer(smiles_list, padding="max_length", truncation=True,
+                                  max_length=128, return_tensors="pt").to(device)
+
+        outputs = self.bert(**encoding)
+        sequence_output = outputs.last_hidden_state  # shape: [B, seq_len, bert_hidden_size]
+
+        # Project to expected hidden size
+        sequence_output = self.project(sequence_output)  # [B, seq_len, hidden_size]
+
+        # Match original mask behavior
+        e_mask = encoding['attention_mask']  # [B, seq_len]
+        ex_e_mask = e_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, seq_len]
         ex_e_mask = (1.0 - ex_e_mask) * -10000.0
-        
-        encoded_layers, attention_scores = self.encoder(emb.float(), ex_e_mask.float())
-        return encoded_layers, attention_scores,e_mask
+
+        # Simulate your return format: encoder layers as list of [B, seq_len, hidden_size]
+        encoded_layers = [sequence_output]  # Just one layer like your original output list
+        attention_scores = None  # Not provided by HuggingFace directly
+
+        return encoded_layers, attention_scores, e_mask
 
 
 
